@@ -29,7 +29,7 @@ This resulted in **unnecessary agent reinstallations**, even when the agent was 
 
 Datto Support confirmed this behavior is related to a known internal issue:
 
-> PT 5134512 — CagService failure events logged during power state transitions.
+> PT 5134512 - CagService failure events logged during power state transitions.
 
 To address this, the remediation logic was redesigned to require **multiple verification conditions** before reinstalling the agent.
 
@@ -63,7 +63,7 @@ Through coordination with Datto Support, it was confirmed that:
 - ~98% of failure events were benign and power-state related
 - This behavior aligns with internal tracking issue **PT 5134512**
 
-The core issue is not that remediation is impossible — it is that:
+The core issue is not that remediation is impossible - it is that:
 
 > Benign service state transitions are logged in a way that is indistinguishable from true service failures without additional contextual validation.
 
@@ -92,10 +92,10 @@ Service state changes during the following conditions should not be interpreted 
 
 If the agent service stops unexpectedly, the agent should:
 
-1. Attempt automatic service restart  
-2. Validate internal agent health  
-3. Reconnect to the RMM platform  
-4. Report recovery status  
+1. Attempt automatic service restart
+2. Validate internal agent health
+3. Reconnect to the RMM platform
+4. Report recovery status
 
 Only when these steps fail should external remediation be considered.
 
@@ -116,7 +116,7 @@ These signals should be distinguishable from routine operating system lifecycle 
 
 The issue can be reproduced using normal Windows lifecycle events.
 
-## Scenario 1 — System Shutdown
+## Scenario 1 - System Shutdown
 
 1. Device runs normally with **CagService Running**
 2. User initiates Windows shutdown
@@ -137,7 +137,7 @@ Despite the service running normally, the failure event remains in the log.
 
 ---
 
-## Scenario 2 — Sleep / Hibernate
+## Scenario 2 - Sleep / Hibernate
 
 1. Device enters sleep
 2. Windows suspends services
@@ -153,13 +153,13 @@ Again, the failure event remains even though the service recovered automatically
 
 ```
 Shutdown Event Logged
-        ↓
+        ->
 Device Restarts
-        ↓
+        ->
 CagService Already Running
-        ↓
+        ->
 Remediation Script Detects Event
-        ↓
+        ->
 Agent Reinstall Triggered
 ```
 
@@ -169,17 +169,17 @@ Agent Reinstall Triggered
 
 ```
 Device
-   ↓
+   ->
 Universal Fix Script
-   ↓
+   ->
 Decision Logic
-   ↓
+   ->
 Restart Service OR Reinstall Agent
-   ↓
+   ->
 Optional Lambda Logging
-   ↓
+   ->
 AWS S3 Storage
-   ↓
+   ->
 Operational Analysis
 ```
 
@@ -209,6 +209,26 @@ When remediation occurs:
 - Agent installer is downloaded using **siteUID**
 - Agent reinstall is executed
 - Service status is verified
+
+---
+
+# Datto RMM Component Variables (env:)
+
+Use Datto RMM component custom variables to override behavior without editing the script.
+
+| Name | Type | Default Value | Description |
+|------|------|---------------|-------------|
+| `LAMBDA_URL` | String | `""` | Optional Lambda URL for centralized log upload. If empty, logs stay local. |
+| `DATTO_PLATFORM` | Selection | `vidal` | Datto platform shard used for agent download URL construction. |
+| `EVENT_LOOKBACK_HOURS` | String | `24` | Hours to search System log for qualifying `CagService` failures. Valid range: `1-168`. |
+| `STABILIZATION_SECONDS` | String | `300` | Delay before initial service check after script start. |
+| `START_TIMEOUT_SECONDS` | String | `90` | Time to wait for `CagService` to reach `Running` after start attempt. |
+| `POST_REMEDIATE_WAIT_SECONDS` | String | `60` | Time to wait after reinstall before final service validation. |
+| `LOG_ROOT` | String | `C:\ProgramData\Datto_RMM_Logs` | Local directory used for script logs. |
+| `UPLOAD_ON_NO_ACTION` | Boolean {TRUE/FALSE} | `FALSE` | If `TRUE`, uploads log output even when no restart/remediation action occurred. |
+| `REMEDIATE_ENABLED` | Boolean {TRUE/FALSE} | `TRUE` | If `FALSE`, full reinstall remediation is disabled (detection/logging still run). |
+| `TLS12_ENFORCE` | Boolean {TRUE/FALSE} | `TRUE` | If `TRUE`, enforces TLS 1.2 for web requests. |
+| `STARTUP_GRACE_MINUTES` | String | `10` | Skips full remediation during early post-boot window to reduce startup transient false positives. |
 
 ---
 
@@ -251,15 +271,16 @@ S3 folder structure:
 ```
 ServiceRestarts/<siteUID>/<device>/
 Remediations/<siteUID>/<device>/
+NoAction/<siteUID>/<device>/
 ```
 
-Uploads occur **only when action occurs**.
+Uploads occur when action occurs, and optionally when no action occurs if enabled.
 
 | Action | S3 Location |
 |------|------|
 | Service restart resolved issue | ServiceRestarts |
 | Full remediation executed | Remediations |
-| No action required | No upload |
+| No action required + UPLOAD_ON_NO_ACTION=TRUE | NoAction |
 
 ---
 
@@ -287,7 +308,7 @@ Triggers:
 Deploy using:
 
 ```
-Devices → Scripts → Platform Scripts
+Devices -> Scripts -> Platform Scripts
 ```
 
 Recommended for:
@@ -311,16 +332,33 @@ The script can also be executed as a **Datto RMM component** for:
 
 ```
 datto-rmm-remediation
-│
-├── Datto_RMM_Universal_Fix.ps1
-└── README.md
+|
+|-- Datto_RMM_Universal_Fix.ps1
+`-- README.md
 ```
 
 ---
 
 # Version History
 
-## v2.1.0 — Remediation Logic Correction
+## v2.2.0 - Safety and Component Controls
+
+Changes:
+
+- Added preflight-first remediation sequence (validate `siteUID` and download installer before mutation)
+- Added Datto RMM `env:` variable overrides for component-driven behavior
+- Added optional startup grace window to reduce startup transient remediations
+- Tightened failure-event correlation to explicit `CagService` evidence
+- Added optional no-action log upload mode and remediation kill switch
+- Improved tenant parsing and execution-context guardrails
+
+Purpose:
+
+Improve endpoint safety, reduce false positives, and support operator-controlled behavior in Datto RMM components.
+
+---
+
+## v2.1.0 - Remediation Logic Correction
 
 Changes:
 
@@ -336,7 +374,7 @@ Prevent remediation from triggering due to benign power-state events.
 
 ---
 
-## v2.0.9 — Initial Universal Script
+## v2.0.9 - Initial Universal Script
 
 Initial release including:
 
@@ -357,7 +395,7 @@ It is **not an official Datto/Kaseya product component** and should be tested pr
 
 # Author
 
-Jonathan Myers  
+Jonathan Myers
 CTMS IT
 
 # Code Reviewed

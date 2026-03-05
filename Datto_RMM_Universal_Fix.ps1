@@ -35,7 +35,7 @@
 
 .EXAMPLE
     # Run with S3 logging
-    .\Datto_RMM_Universal_Fix.ps1 -LambdaUrl "https://your-lambda-url.amazonawsaws.com/"
+    .\Datto_RMM_Universal_Fix.ps1 -LambdaUrl "https://your-lambda-url.amazonaws.com/"
 
 .EXAMPLE
     # Run without S3 logging (local logs only)
