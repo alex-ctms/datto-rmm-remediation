@@ -639,6 +639,19 @@ if ($StartupGraceMinutes -gt 0) {
     }
 }
 
+# Final sanity check: service may recover while we query events or evaluate guards.
+try {
+    $svc.Refresh()
+} catch {
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+}
+
+if ($svc -and $svc.Status -eq 'Running') {
+    Write-DecisionLine "$ServiceName recovered to Running after start timeout/event review. Skipping full remediation."
+    $FinalServiceStatus = "Running"
+    goto Done
+}
+
 Write-DecisionLine "Both conditions met (service not Running + failure event detected). Proceeding with FULL REMEDIATION."
 $ActionTaken = "remediation"
 $RemediationAttempted = $true
