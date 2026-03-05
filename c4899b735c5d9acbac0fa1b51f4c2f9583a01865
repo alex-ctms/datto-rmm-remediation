@@ -1,0 +1,16 @@
+Why this change:
+- Operators needed runtime-safe controls in Datto RMM components without editing script code.
+- Investigation showed false-positive remediation risk from broad event correlation and startup transients.
+
+Key technical rationale (regex vs -SimpleMatch):
+- Tenant output from dsregcmd is structured but can vary in spacing/formatting.
+- Regex allows robust extraction and parsing in one step (pattern: TenantName\s*:\s*(.+)).
+- Capturing group access via $tenantLine.Matches[0].Groups[1].Value.Trim() returns only the tenant name.
+- -SimpleMatch is best for exact/static string presence checks; it does not parse variable content.
+- With -SimpleMatch, we'd need extra split/trim logic (e.g., split on ':' then trim), which is more brittle and error-prone.
+
+What this commit improves:
+- Adds env-driven configuration overrides for Datto component variables.
+- Tightens failure event matching to explicit CagService evidence.
+- Adds startup grace suppression and privilege guardrails.
+- Adds optional no-action upload mode for operational observability.
