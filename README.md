@@ -1,233 +1,251 @@
-# Datto RMM Self-Healing Remediation
+# Datto RMM Agent Remediation Framework
 
-Automated monitoring and remediation solution for Datto RMM agents. Detects and fixes offline or stopped CagService through service restart or full agent reinstallation.
+This repository contains a remediation framework designed to monitor and repair Datto RMM agents when the **CagService** becomes non-functional or stops running.
 
-## Features
+The goal is to provide **safe, automated remediation** while avoiding unnecessary agent reinstalls caused by benign service events.
 
-- 🔄 **Automatic Service Restart** - Attempts to restart CagService with 90-second timeout
-- 🔍 **Event Log Analysis** - Checks Windows Event Log for service failure patterns
-- 🚨 **Full Remediation** - Reinstalls Datto RMM agent when restart fails
-- 📊 **Centralized Logging** - Optional S3 upload via AWS Lambda
-- 🌐 **Multi-Platform Support** - Works with domain-joined (GPO) and non-domain devices (Intune)
-- 🔐 **Azure AD Detection** - Properly identifies Azure AD tenant names
+---
 
-## Requirements
+# Background
 
-- Windows 10/11 (excluding Home editions)
-- PowerShell 5.1 or later
-- Datto RMM agent previously installed
-- Administrator/SYSTEM privileges
+During normal operation, Datto RMM agents occasionally log **CagService failure events** in the Windows System Event Log.
 
-## Deployment Methods
+Through investigation with Datto Support (Ticket **#6736841**), it was determined that:
 
-### Option 1: Group Policy (Domain-Joined Devices)
+- Approximately **98% of observed CagService failure events** occurred during normal system state transitions such as:
+  - Shutdown
+  - Sleep
+  - Hibernate
+  - Resume
 
-Deploy via GPO scheduled task that runs:
-- At system startup (5-minute delay)
-- Daily at 12:00 PM
+These events were being recorded by the Windows **Service Control Manager**, even though:
 
-**Script location:** `\\domain.com\SYSVOL\domain.com\scripts\Datto\Datto_RMM_Universal_Fix.ps1`
+- The Datto agent recovered automatically
+- The service was already **Running** again by the time remediation scripts executed
 
-### Option 2: Microsoft Intune (Non-Domain Devices)
+Earlier versions of this remediation script interpreted **any failure event within a time window** as justification to reinstall the agent.
 
-Deploy as Platform Script or Proactive Remediation to Azure AD joined or workgroup devices.
+This resulted in **unnecessary agent reinstallations**, even when the agent was healthy.
 
-### Option 3: Direct Execution
+Datto Support confirmed this behavior is related to a known internal issue:
 
-Run manually for testing or one-off remediation:
+> PT 5134512 — CagService failure events logged during power state transitions.
 
-```powershell
-# Without S3 logging
-.\Datto_RMM_Universal_Fix.ps1
+To address this, the remediation logic was redesigned to require **multiple verification conditions** before reinstalling the agent.
 
-# With S3 logging
-.\Datto_RMM_Universal_Fix.ps1 -LambdaUrl "https://your-lambda-url.amazonaws.com/"
-```
+---
 
-## Parameters
+# Remediation Logic
 
-### `-LambdaUrl` (Optional)
-AWS Lambda function URL for centralized S3 log uploads.
+The script now performs remediation using **AND-gated logic**.
 
-**Example:**
-```powershell
--LambdaUrl "https://abc123.lambda-url.us-east-1.on.aws/"
-```
+Full agent remediation occurs **only when BOTH conditions are true:**
 
-### `-Platform` (Optional)
-Datto RMM platform name. Default: `"vidal"`
+1. **CagService is not currently running**
+2. **A qualifying CagService failure event exists within the configured lookback window**
 
-**Example:**
-```powershell
--Platform "concord"
-```
+If the service is already **Running**, the script **exits without remediation**, regardless of historical failure events.
 
-## How It Works
+This ensures benign power-state events do not trigger unnecessary reinstalls.
 
-1. **System Stabilization** - Waits 5 minutes after boot for services to initialize
-2. **Service Check** - Checks if CagService is running
-3. **Service Restart** - If stopped, attempts to start the service (90-second timeout)
-4. **Event Log Analysis** - Checks for service failure events (IDs: 7000, 7001, 7009, 7031, 7034)
-5. **Full Remediation** - If restart fails AND event log shows failures:
-   - Stops CagService
-   - Renames agent directory (`C:\ProgramData\CentraStage` → `CentraStage.OLD_timestamp`)
-   - Downloads fresh agent installer from Datto portal
-   - Installs silently
-6. **Logging** - Creates detailed transcript log locally and optionally uploads to S3
+---
 
-## Log Files
+# Script Behavior
 
-**Local logs:** `C:\ProgramData\Datto_RMM_Logs\`
+The remediation script performs the following steps:
 
-**Filename format:** `DOMAIN_HOSTNAME_TIMESTAMP.log`
+1. Waits **5 minutes** after system startup to allow services to stabilize.
+2. Checks the status of **CagService**.
+3. If the service is **not running**, attempts a service start.
+4. If the start attempt fails:
+   - The script checks Windows Event Logs for relevant service failures.
+5. If both failure conditions are satisfied:
+   - Performs full Datto agent remediation.
 
-**Examples:**
-- `contoso.com_SERVER01_20251201_120530.log`
-- `contoso.onmicrosoft.com_LAPTOP42_20251201_083045.log`
-- `WORKGROUP_PC123_20251201_094512.log`
+Remediation includes:
 
-## S3 Folder Structure
+- Stopping the service
+- Backing up the existing agent directory
+- Downloading the correct installer using the device **siteUID**
+- Reinstalling the agent silently
+- Verifying the service is running afterward
 
-When Lambda URL is provided, logs are organized by remediation type:
+---
+
+# Logging
+
+The script generates detailed logs to:
 
 ```
-S3_BUCKET/
-├── ServiceRestartFix/
-│   ├── contoso.com_SERVER01_20251201_120530.log
-│   └── fabrikam.com_WS042_20251201_141203.log
-└── FullRemediation/
-    ├── contoso.com_DC03_20251201_083421.log
-    └── adventureworks.local_SQL01_20251201_152337.log
+C:\ProgramData\Datto_RMM_Logs\
 ```
 
-## AWS Lambda Setup (Optional)
+Log file naming format:
 
-If you want centralized S3 logging, you'll need:
-
-1. **S3 Bucket** - For storing log files
-2. **Lambda Function** - To receive logs and upload to S3
-3. **Lambda Function URL** - Public HTTPS endpoint
-
-**Required query parameters:**
-- `device` - Hostname
-- `mode` - `restart` or `remediation`
-- `prefix` - S3 folder path
-- `domain` - Domain or tenant name
-- `s3filename` - Log filename
-- `ts` - Timestamp
-
-See the [Lambda example](#lambda-example) below for implementation details.
-
-## Security Considerations
-
-- Script runs as SYSTEM (highest privileges)
-- Lambda URL should be kept private if using S3 logging
-- No credentials are stored in the script
-- Agent downloads use HTTPS (TLS 1.2)
-- Old agent directories are renamed, not deleted (for forensics)
-
-## Troubleshooting
-
-**Script doesn't run:**
-- Verify scheduled task exists and is enabled
-- Check execution policy: `Get-ExecutionPolicy`
-- Review Windows Event Log → Task Scheduler
-
-**Service restart fails:**
-- Check if CagService exists: `Get-Service CagService`
-- Verify Settings.json exists: `C:\ProgramData\CentraStage\AEMAgent\Settings.json`
-- Review local log file for errors
-
-**Logs not uploading to S3:**
-- Verify Lambda URL is correct and accessible
-- Check Lambda function logs in CloudWatch
-- Test Lambda endpoint manually with `Invoke-RestMethod`
-
-**Agent reinstall fails:**
-- Verify siteUID in Settings.json is valid GUID format
-- Check network connectivity to `*.rmm.datto.com`
-- Ensure HTTPS/TLS 1.2 is not blocked by firewall
-
-## Version History
-
-### v2.0.8 (2025-12-01)
-- Improved Azure AD tenant name detection using `dsregcmd`
-- Enhanced domain detection fallback logic
-- Added configurable Lambda URL parameter
-- Updated log filename format to include domain/tenant
-
-### v2.0.0 (2025-11-28)
-- Initial public release
-- Core remediation logic
-- GPO and Intune deployment support
-
-## Lambda Example
-
-Sample Python Lambda function for S3 uploads:
-
-```python
-import json
-import boto3
-from datetime import datetime
-
-BUCKET_NAME = "your-log-bucket"
-s3 = boto3.client("s3")
-
-def lambda_handler(event, context):
-    try:
-        # Get query parameters
-        qs = event.get("queryStringParameters") or {}
-        prefix = qs.get("prefix", "")
-        s3filename = qs.get("s3filename", "")
-        
-        if prefix and s3filename:
-            key = f"{prefix}{s3filename}"
-        else:
-            # Fallback for old format
-            device = qs.get("device", "unknown")
-            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-            key = f"{device}/{ts}.log"
-        
-        # Get log content from body
-        body = event.get("body", "")
-        if event.get("isBase64Encoded"):
-            import base64
-            body = base64.b64decode(body).decode("utf-8")
-        
-        # Upload to S3
-        s3.put_object(
-            Bucket=BUCKET_NAME,
-            Key=key,
-            Body=body.encode("utf-8"),
-            ContentType="text/plain"
-        )
-        
-        return {
-            "statusCode": 200,
-            "body": json.dumps({"ok": True, "key": key})
-        }
-    except Exception as e:
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+```
+<Domain_or_Tenant>_<DeviceName>_<Timestamp>.log
 ```
 
-## Contributing
+Example:
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+```
+CONTOSO-PC01_20260305_101455.log
+```
 
-## License
+Logs contain:
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- Service state checks
+- Event log evidence
+- Remediation decisions
+- Installer results
+- Final service status
 
-## Support
+---
 
-For issues or questions:
-- Open an issue on GitHub
-- Check existing issues for solutions
-- Review troubleshooting section above
+# Optional Centralized Logging
 
-## Acknowledgments
+If a **LambdaUrl** is provided, logs can be uploaded to AWS.
 
-Built for MSPs managing Datto RMM across multiple client environments.
+Logs are sent via HTTP POST to a Lambda function which stores them in S3.
+
+Folder structure in S3:
+
+```
+ServiceRestarts/<siteUID>/<device>/
+Remediations/<siteUID>/<device>/
+```
+
+Logs are uploaded **only when action occurs**:
+
+| Action | Upload Location |
+|------|------|
+| Service restart resolved issue | ServiceRestarts |
+| Full remediation executed | Remediations |
+| No action required | No upload |
+
+---
+
+# Deployment Options
+
+The script can be deployed through multiple methods depending on environment.
+
+### Group Policy (Recommended for domain environments)
+
+Deployed via **GPO Scheduled Task**:
+
+```
+Computer Configuration
+  → Preferences
+    → Control Panel Settings
+      → Scheduled Tasks
+```
+
+Runs under:
+
+```
+NT AUTHORITY\SYSTEM
+```
+
+Triggers:
+
+- At system startup
+- Optional daily health check
+
+---
+
+### Intune Deployment
+
+The script can be deployed using:
+
+```
+Intune → Devices → Scripts → Platform Scripts
+```
+
+Recommended for:
+
+- Azure AD joined devices
+- Non-domain laptops
+
+---
+
+### Datto RMM Component
+
+The script can also run as a **Datto RMM component** when agents are already healthy.
+
+This allows:
+
+- On-demand remediation
+- Manual troubleshooting
+- Controlled deployments
+
+---
+
+# Repository Structure
+
+```
+datto-rmm-remediation
+│
+├── Datto_RMM_Universal_Fix.ps1
+│
+└── README.md
+```
+
+---
+
+# Version History
+
+## v2.1.0 — Remediation Logic Correction
+
+Updated remediation logic based on findings from the Datto RMM investigation regarding CagService failure events occurring during shutdown and power-state transitions.
+
+Changes:
+
+- Implemented **strict AND-gated remediation logic**
+- Prevented unnecessary agent reinstalls caused by historical events
+- Added **failure event timestamp logging**
+- Improved service restart verification
+- Adjusted S3 logging behavior to upload logs only when action occurs
+
+Purpose:
+
+Prevent benign shutdown/sleep events from triggering unnecessary agent reinstalls.
+
+---
+
+## v2.0.9 — Initial Universal Remediation Script
+
+Initial release of the Datto RMM Universal Fix script.
+
+Features:
+
+- Detects CagService failures
+- Attempts automatic service restart
+- Performs full agent reinstall when failures are detected
+- Optional AWS Lambda / S3 logging
+- Designed for deployment via GPO, Intune, or Datto RMM
+
+---
+
+# Future Improvements
+
+Possible enhancements under consideration:
+
+- Additional telemetry around agent health
+- Network connectivity checks prior to remediation
+- Extended diagnostic logging for Datto Support
+- Optional alerting integrations
+
+---
+
+# Disclaimer
+
+This script is intended to assist in maintaining Datto RMM agent stability in environments where agents may become unhealthy.
+
+It is not an official Datto/Kaseya product component and should be tested prior to large-scale deployment.
+
+---
+
+# Author
+
+Jonathan Myers  
+CTMS IT
