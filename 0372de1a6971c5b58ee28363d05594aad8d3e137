@@ -1,0 +1,13 @@
+Why this change:
+- Additional failsafes and diagnostics were required to make failures easier to triage and to reduce risk during remediation faults.
+
+What this commit improves:
+- Adds structured logging channels (DECISION/WARNING/ERROR).
+- Adds explicit env validation warnings with fallback behavior visibility.
+- Adds richer event diagnostics (top qualifying events + query fault visibility).
+- Adds rename retry strategy with unique backup suffixes.
+- Adds rollback restore path on remediation failure signals.
+- Adds end-of-run summary fields (action, remediation attempted, installer exit code, rollback status, final service status).
+
+Outcome:
+- Improved operational observability and safer fault handling while preserving existing remediation gate logic.
