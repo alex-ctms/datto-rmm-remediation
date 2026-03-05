@@ -1,251 +1,354 @@
-# Datto RMM Agent Remediation Framework
+Datto RMM Agent Remediation Framework
 
-This repository contains a remediation framework designed to monitor and repair Datto RMM agents when the **CagService** becomes non-functional or stops running.
+This repository contains a remediation framework designed to monitor and repair Datto RMM agents when the CagService becomes non-functional or stops running.
 
-The goal is to provide **safe, automated remediation** while avoiding unnecessary agent reinstalls caused by benign service events.
+The goal is to provide safe, automated remediation while avoiding unnecessary agent reinstalls caused by benign service events.
 
----
+Background
 
-# Background
+During normal operation, Datto RMM agents occasionally log CagService failure events in the Windows System Event Log.
 
-During normal operation, Datto RMM agents occasionally log **CagService failure events** in the Windows System Event Log.
+Through investigation with Datto Support (Ticket #6736841), it was determined that:
 
-Through investigation with Datto Support (Ticket **#6736841**), it was determined that:
+Approximately 98% of observed CagService failure events occurred during normal system state transitions such as:
 
-- Approximately **98% of observed CagService failure events** occurred during normal system state transitions such as:
-  - Shutdown
-  - Sleep
-  - Hibernate
-  - Resume
+Shutdown
 
-These events were being recorded by the Windows **Service Control Manager**, even though:
+Sleep
 
-- The Datto agent recovered automatically
-- The service was already **Running** again by the time remediation scripts executed
+Hibernate
 
-Earlier versions of this remediation script interpreted **any failure event within a time window** as justification to reinstall the agent.
+Resume
 
-This resulted in **unnecessary agent reinstallations**, even when the agent was healthy.
+These events were being recorded by the Windows Service Control Manager, even though:
+
+The Datto agent recovered automatically
+
+The service was already Running again by the time remediation scripts executed
+
+Earlier versions of this remediation script interpreted any failure event within a time window as justification to reinstall the agent.
+
+This resulted in unnecessary agent reinstallations, even when the agent was healthy.
 
 Datto Support confirmed this behavior is related to a known internal issue:
 
-> PT 5134512 — CagService failure events logged during power state transitions.
+PT 5134512 — CagService failure events logged during power state transitions.
 
-To address this, the remediation logic was redesigned to require **multiple verification conditions** before reinstalling the agent.
+To address this, the remediation logic was redesigned to require multiple verification conditions before reinstalling the agent.
 
----
+Problem Statement
 
-# Remediation Logic
+Datto RMM agents in our environment were triggering repeated remediation actions due to CagService failure events recorded during normal Windows power-state transitions.
 
-The script now performs remediation using **AND-gated logic**.
+Observed behavior:
 
-Full agent remediation occurs **only when BOTH conditions are true:**
+CagService failure events logged during:
 
-1. **CagService is not currently running**
-2. **A qualifying CagService failure event exists within the configured lookback window**
+Shutdown
 
-If the service is already **Running**, the script **exits without remediation**, regardless of historical failure events.
+Sleep
 
-This ensures benign power-state events do not trigger unnecessary reinstalls.
+Hibernate
 
----
+Resume
 
-# Script Behavior
+The service automatically recovered within seconds.
 
-The remediation script performs the following steps:
+By the time remediation executed, CagService was already Running.
 
-1. Waits **5 minutes** after system startup to allow services to stabilize.
-2. Checks the status of **CagService**.
-3. If the service is **not running**, attempts a service start.
-4. If the start attempt fails:
-   - The script checks Windows Event Logs for relevant service failures.
-5. If both failure conditions are satisfied:
-   - Performs full Datto agent remediation.
+However, historical failure events within the lookback window caused full agent reinstalls.
 
-Remediation includes:
+Impact
 
-- Stopping the service
-- Backing up the existing agent directory
-- Downloading the correct installer using the device **siteUID**
-- Reinstalling the agent silently
-- Verifying the service is running afterward
+Unnecessary agent uninstall/reinstall cycles
 
----
+Increased bandwidth usage
 
-# Logging
+Excessive log noise
 
-The script generates detailed logs to:
+Operational uncertainty around true agent failures
 
-```
+Risk of masking legitimate underlying issues
+
+Through coordination with Datto Support, it was confirmed that:
+
+~98% of failure events were benign and power-state related
+
+This behavior aligns with internal tracking issue PT 5134512
+
+The core issue is not that remediation is impossible — it is that:
+
+Benign service state transitions are logged in a way that is indistinguishable from true service failures without additional contextual validation.
+
+Therefore remediation logic must:
+
+Validate current service health
+
+Validate recent failure evidence
+
+Avoid acting on stale or benign events
+
+Desired Product Behavior
+
+Ideally, the Datto RMM agent should internally differentiate between benign service transitions and true service failures, eliminating the need for external remediation logic.
+
+Ignore Expected Power-State Transitions
+
+Service state changes during the following conditions should not be interpreted as failures:
+
+System shutdown
+
+Sleep / hibernate
+
+Resume from sleep
+
+Fast startup transitions
+
+Perform Internal Self-Recovery
+
+If the agent service stops unexpectedly, the agent should:
+
+Attempt automatic service restart
+
+Validate internal agent health
+
+Reconnect to the RMM platform
+
+Report recovery status
+
+Only when these steps fail should external remediation be considered.
+
+Provide Accurate Failure Signals
+
+Failure events intended to trigger remediation should represent true agent failures, such as:
+
+Service crash
+
+Service startup failure
+
+Agent corruption
+
+Dependency failure
+
+These signals should be distinguishable from routine operating system lifecycle events.
+
+Reproduction Scenario
+
+The issue can be reproduced using normal Windows lifecycle events.
+
+Scenario 1 — System Shutdown
+
+Device is running normally with CagService Running
+
+User initiates Windows shutdown
+
+Windows logs an event similar to:
+
+Event ID: 7031
+Provider: Service Control Manager
+
+The CagService service terminated unexpectedly.
+
+System powers down normally
+
+Device boots again
+
+CagService starts successfully
+
+Despite the service running normally, the failure event remains in the event log.
+
+Scenario 2 — Sleep / Hibernate
+
+Device enters sleep
+
+Windows suspends services
+
+Event log records a CagService stop/failure
+
+Device resumes
+
+CagService resumes normally
+
+Again, the failure event remains even though the service recovered automatically.
+
+False Remediation Flow
+Shutdown Event Logged
+        ↓
+Device Restarts
+        ↓
+CagService Already Running
+        ↓
+Remediation Script Detects Event
+        ↓
+Agent Reinstall Triggered
+Architecture Overview
+
+The remediation framework operates using the following flow:
+
+Device
+   ↓
+Universal Fix Script
+   ↓
+Decision Logic
+   ↓
+Restart Service OR Reinstall Agent
+   ↓
+Optional Lambda Logging
+   ↓
+AWS S3 Storage
+   ↓
+Operational Analysis
+Script Behavior
+
+The remediation script performs the following workflow:
+
+Waits 5 minutes for system stabilization
+
+Checks CagService status
+
+If the service is NOT running, attempts service restart
+
+If restart fails, checks Windows Event Logs
+
+Full remediation occurs only when:
+
+CagService NOT Running
+AND
+Failure Event Present
+
+If the service is already running, the script exits without remediation, even if failure events exist.
+
+When remediation occurs:
+
+Agent directory is backed up
+
+Agent installer is downloaded using siteUID
+
+Agent reinstall is executed
+
+Service status is verified
+
+Logging
+
+Logs are written locally to:
+
 C:\ProgramData\Datto_RMM_Logs\
-```
 
-Log file naming format:
+Log format:
 
-```
 <Domain_or_Tenant>_<DeviceName>_<Timestamp>.log
-```
 
 Example:
 
-```
 CONTOSO-PC01_20260305_101455.log
-```
 
-Logs contain:
+Logs include:
 
-- Service state checks
-- Event log evidence
-- Remediation decisions
-- Installer results
-- Final service status
+Service status checks
 
----
+Event log evidence
 
-# Optional Centralized Logging
+Remediation decisions
 
-If a **LambdaUrl** is provided, logs can be uploaded to AWS.
+Installer results
 
-Logs are sent via HTTP POST to a Lambda function which stores them in S3.
+Final service status
 
-Folder structure in S3:
+Optional Centralized Logging (AWS)
 
-```
+If a LambdaUrl is configured, logs can be uploaded to AWS.
+
+S3 folder structure:
+
 ServiceRestarts/<siteUID>/<device>/
 Remediations/<siteUID>/<device>/
-```
 
-Logs are uploaded **only when action occurs**:
+Uploads occur only when action occurs.
 
-| Action | Upload Location |
-|------|------|
-| Service restart resolved issue | ServiceRestarts |
-| Full remediation executed | Remediations |
-| No action required | No upload |
+Action	S3 Location
+Service restart resolved issue	ServiceRestarts
+Full remediation executed	Remediations
+No action required	No upload
+Deployment Options
+Group Policy (Recommended)
 
----
+Deploy via Scheduled Task GPO
 
-# Deployment Options
+Runs as:
 
-The script can be deployed through multiple methods depending on environment.
-
-### Group Policy (Recommended for domain environments)
-
-Deployed via **GPO Scheduled Task**:
-
-```
-Computer Configuration
-  → Preferences
-    → Control Panel Settings
-      → Scheduled Tasks
-```
-
-Runs under:
-
-```
 NT AUTHORITY\SYSTEM
-```
 
 Triggers:
 
-- At system startup
-- Optional daily health check
+System startup
 
----
+Daily scheduled task (optional)
 
-### Intune Deployment
+Microsoft Intune
 
-The script can be deployed using:
+Deploy using:
 
-```
-Intune → Devices → Scripts → Platform Scripts
-```
+Devices → Scripts → Platform Scripts
 
 Recommended for:
 
-- Azure AD joined devices
-- Non-domain laptops
+Azure AD joined devices
 
----
+Non-domain laptops
 
-### Datto RMM Component
+Datto RMM Component
 
-The script can also run as a **Datto RMM component** when agents are already healthy.
+The script can also be executed as a Datto RMM component for:
 
-This allows:
+manual remediation
 
-- On-demand remediation
-- Manual troubleshooting
-- Controlled deployments
+controlled deployments
 
----
+troubleshooting
 
-# Repository Structure
-
-```
+Repository Structure
 datto-rmm-remediation
 │
 ├── Datto_RMM_Universal_Fix.ps1
-│
 └── README.md
-```
-
----
-
-# Version History
-
-## v2.1.0 — Remediation Logic Correction
-
-Updated remediation logic based on findings from the Datto RMM investigation regarding CagService failure events occurring during shutdown and power-state transitions.
+Version History
+v2.1.0 — Remediation Logic Correction
 
 Changes:
 
-- Implemented **strict AND-gated remediation logic**
-- Prevented unnecessary agent reinstalls caused by historical events
-- Added **failure event timestamp logging**
-- Improved service restart verification
-- Adjusted S3 logging behavior to upload logs only when action occurs
+Implemented AND-gated remediation logic
+
+Prevented unnecessary agent reinstalls
+
+Added failure event timestamp logging
+
+Improved restart validation
+
+Improved S3 log categorization
 
 Purpose:
 
-Prevent benign shutdown/sleep events from triggering unnecessary agent reinstalls.
+Prevent remediation from triggering due to benign power-state events.
 
----
+v2.0.9 — Initial Universal Script
 
-## v2.0.9 — Initial Universal Remediation Script
+Initial release including:
 
-Initial release of the Datto RMM Universal Fix script.
+Service monitoring
 
-Features:
+Restart logic
 
-- Detects CagService failures
-- Attempts automatic service restart
-- Performs full agent reinstall when failures are detected
-- Optional AWS Lambda / S3 logging
-- Designed for deployment via GPO, Intune, or Datto RMM
+Agent reinstall capability
 
----
+AWS logging integration
 
-# Future Improvements
+Disclaimer
 
-Possible enhancements under consideration:
-
-- Additional telemetry around agent health
-- Network connectivity checks prior to remediation
-- Extended diagnostic logging for Datto Support
-- Optional alerting integrations
-
----
-
-# Disclaimer
-
-This script is intended to assist in maintaining Datto RMM agent stability in environments where agents may become unhealthy.
+This script is provided to maintain Datto RMM agent stability in environments experiencing service state inconsistencies.
 
 It is not an official Datto/Kaseya product component and should be tested prior to large-scale deployment.
 
----
+Author
 
-# Author
-
-Jonathan Myers  
+Jonathan Myers
 CTMS IT
