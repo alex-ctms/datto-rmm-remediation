@@ -1,0 +1,8 @@
+Why this change:
+- Endpoints could be left in a degraded/unmanaged state when remediation renamed C:\ProgramData\CentraStage before validating reinstall prerequisites.
+- If siteUID resolution failed or the installer download failed, the script could abort after mutation.
+
+What this commit improves:
+- Reordered remediation to preflight requirements first (valid siteUID and successful installer download).
+- Ensures we abort before destructive operations when prerequisites are missing.
+- Aligns with safety-first remediation policy for field reliability.
