@@ -29,7 +29,7 @@ This resulted in **unnecessary agent reinstallations**, even when the agent was 
 
 Datto Support confirmed this behavior is related to a known internal issue:
 
-> PT 5134512 - CagService failure events logged during power state transitions.
+> PT 5134512 — CagService failure events logged during power state transitions.
 
 To address this, the remediation logic was redesigned to require **multiple verification conditions** before reinstalling the agent.
 
@@ -63,7 +63,7 @@ Through coordination with Datto Support, it was confirmed that:
 - ~98% of failure events were benign and power-state related
 - This behavior aligns with internal tracking issue **PT 5134512**
 
-The core issue is not that remediation is impossible - it is that:
+The core issue is not that remediation is impossible — it is that:
 
 > Benign service state transitions are logged in a way that is indistinguishable from true service failures without additional contextual validation.
 
@@ -116,7 +116,7 @@ These signals should be distinguishable from routine operating system lifecycle 
 
 The issue can be reproduced using normal Windows lifecycle events.
 
-## Scenario 1 - System Shutdown
+## Scenario 1 — System Shutdown
 
 1. Device runs normally with **CagService Running**
 2. User initiates Windows shutdown
@@ -137,7 +137,7 @@ Despite the service running normally, the failure event remains in the log.
 
 ---
 
-## Scenario 2 - Sleep / Hibernate
+## Scenario 2 — Sleep / Hibernate
 
 1. Device enters sleep
 2. Windows suspends services
@@ -153,13 +153,13 @@ Again, the failure event remains even though the service recovered automatically
 
 ```
 Shutdown Event Logged
-        ->
+        ↓
 Device Restarts
-        ->
+        ↓
 CagService Already Running
-        ->
+        ↓
 Remediation Script Detects Event
-        ->
+        ↓
 Agent Reinstall Triggered
 ```
 
@@ -169,17 +169,17 @@ Agent Reinstall Triggered
 
 ```
 Device
-   ->
+   ↓
 Universal Fix Script
-   ->
+   ↓
 Decision Logic
-   ->
+   ↓
 Restart Service OR Reinstall Agent
-   ->
+   ↓
 Optional Lambda Logging
-   ->
+   ↓
 AWS S3 Storage
-   ->
+   ↓
 Operational Analysis
 ```
 
@@ -308,7 +308,7 @@ Triggers:
 Deploy using:
 
 ```
-Devices -> Scripts -> Platform Scripts
+Devices → Scripts → Platform Scripts
 ```
 
 Recommended for:
@@ -332,16 +332,16 @@ The script can also be executed as a **Datto RMM component** for:
 
 ```
 datto-rmm-remediation
-|
-|-- Datto_RMM_Universal_Fix.ps1
-`-- README.md
+│
+├── Datto_RMM_Universal_Fix.ps1
+└── README.md
 ```
 
 ---
 
 # Version History
 
-## v2.2.0 - Safety and Component Controls
+## v2.2.0 — Safety and Component Controls
 
 Changes:
 
@@ -358,7 +358,7 @@ Improve endpoint safety, reduce false positives, and support operator-controlled
 
 ---
 
-## v2.1.0 - Remediation Logic Correction
+## v2.1.0 — Remediation Logic Correction
 
 Changes:
 
@@ -374,7 +374,7 @@ Prevent remediation from triggering due to benign power-state events.
 
 ---
 
-## v2.0.9 - Initial Universal Script
+## v2.0.9 — Initial Universal Script
 
 Initial release including:
 
