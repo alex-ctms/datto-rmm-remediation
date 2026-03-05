@@ -1,0 +1,9 @@
+Why this change:
+- The prior docs cleanup normalized symbols in a way that reduced readability for the team’s preferred style.
+
+What this commit improves:
+- Restores Unicode style conventions in README:
+  - em dashes (—)
+  - flow arrows (↓ / →)
+  - box-drawing tree characters (│ ├── └──)
+- Keeps functional documentation updates while preserving preferred presentation.
