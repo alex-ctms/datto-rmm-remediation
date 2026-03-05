@@ -307,16 +307,40 @@ Write-LogLine "Both conditions met (service not Running + failure event detected
 # =========================
 # Full remediation
 # =========================
-try { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue } catch {}
-
-# Determine siteUID before we rename anything (best-effort)
+# Determine siteUID before any destructive change
 $siteUid = Get-SiteUid
 if (-not $siteUid) {
-    Write-LogLine "WARNING: Unable to read siteUID from $SettingsJsonPath. Remediation will still attempt reinstall using existing value if present in environment."
-    $siteUid = "UnknownUUID"
+    Write-LogLine "ERROR: Unable to read valid siteUID from $SettingsJsonPath. Aborting full remediation before any changes."
+    goto Done
 } else {
     Write-LogLine "Using siteUID (UUID folder): $siteUid"
 }
+
+# Preflight download before changing service/files
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$downloadUrl = "https://$Platform.rmm.datto.com/download-agent/windows/$siteUid"
+$tempExe     = Join-Path $env:TEMP ("AgentInstall_{0}.exe" -f $siteUid)
+
+Write-LogLine "Preflight: downloading agent installer before mutation: $downloadUrl"
+try {
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempExe -UseBasicParsing -ErrorAction Stop
+    if (-not (Test-Path $tempExe)) {
+        throw "Installer not found at expected path after download."
+    }
+
+    $downloaded = Get-Item -Path $tempExe -ErrorAction Stop
+    if ($downloaded.Length -le 0) {
+        throw "Downloaded installer is empty."
+    }
+
+    Write-LogLine "Preflight download complete: $tempExe ($($downloaded.Length) bytes)"
+} catch {
+    Write-LogLine "ERROR: Preflight download failed. Aborting before service/file changes: $($_.Exception.Message)"
+    goto Done
+}
+
+try { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue } catch {}
 
 # Rename agent dir (forensics)
 $agentDir = "C:\ProgramData\CentraStage"
@@ -331,26 +355,6 @@ if (Test-Path $agentDir) {
     }
 } else {
     Write-LogLine "Agent directory not found at $agentDir (continuing)."
-}
-
-# Download/install over top (site-specific)
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-if ($siteUid -eq "UnknownUUID") {
-    Write-LogLine "ERROR: siteUID is unknown; cannot build download URL safely. Aborting remediation."
-    goto Done
-}
-
-$downloadUrl = "https://$Platform.rmm.datto.com/download-agent/windows/$siteUid"
-$tempExe     = Join-Path $env:TEMP ("AgentInstall_{0}.exe" -f $siteUid)
-
-Write-LogLine "Downloading agent installer: $downloadUrl"
-try {
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $tempExe -UseBasicParsing -ErrorAction Stop
-    Write-LogLine "Download complete: $tempExe"
-} catch {
-    Write-LogLine "ERROR: Download failed: $($_.Exception.Message)"
-    goto Done
 }
 
 Write-LogLine "Running installer silently..."
