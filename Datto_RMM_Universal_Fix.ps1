@@ -42,7 +42,7 @@
     .\Datto_RMM_Universal_Fix.ps1
 
 .NOTES
-    Version: 2.1.0
+    Version: 2.2.0
     Requires: PowerShell 5.1+, Windows 10/11, Datto RMM agent previously installed
     Logs: C:\ProgramData\Datto_RMM_Logs\
 #>
@@ -70,6 +70,10 @@ $LocalLogRoot         = "C:\ProgramData\Datto_RMM_Logs"
 $StabilizationSeconds = 300   # 5 minutes
 $StartTimeoutSeconds  = 90    # service start verification
 $PostRemediateWaitSec = 60
+$UploadOnNoAction     = $false
+$RemediateEnabled     = $true
+$Tls12Enforce         = $true
+$StartupGraceMinutes  = 10
 
 # Event IDs commonly seen for service failures/timeouts/crashes
 $ServiceFailureEventIds = @(7000,7001,7009,7031,7034)
@@ -102,9 +106,9 @@ function Get-DomainOrTenantName {
     try {
         $ds = & dsregcmd /status 2>$null
         if ($ds) {
-            $tenantLine = ($ds | Select-String -Pattern 'TenantName\s*:\s*' -SimpleMatch | Select-Object -First 1)
+            $tenantLine = ($ds | Select-String -Pattern 'TenantName\s*:\s*(.+)' | Select-Object -First 1)
             if ($tenantLine) {
-                $tenant = ($tenantLine.Line -split ':\s*',2)[1].Trim()
+                $tenant = $tenantLine.Matches[0].Groups[1].Value.Trim()
                 if ($tenant) { return $tenant }
             }
         }
@@ -131,7 +135,7 @@ function Get-CagServiceFailureEvents {
     )
 
     # We filter to Service Control Manager provider and the common IDs above,
-    # then look for messages that reference CagService (or "Datto RMM" occasionally).
+    # then require explicit CagService evidence to avoid unrelated service noise.
     $filter = @{
         LogName      = 'System'
         ProviderName = 'Service Control Manager'
@@ -148,7 +152,7 @@ function Get-CagServiceFailureEvents {
 
     $hits = foreach ($e in $events) {
         $msg = $e.Message
-        if ($msg -match '(?i)\bCagService\b' -or $msg -match '(?i)\bDatto\b' -or $msg -match '(?i)\bCentraStage\b') {
+        if ($msg -match '(?i)\bCagService\b') {
             [PSCustomObject]@{
                 TimeCreated = $e.TimeCreated
                 Id          = $e.Id
@@ -163,7 +167,7 @@ function Get-CagServiceFailureEvents {
 
 function Invoke-LambdaUpload {
     param(
-        [Parameter(Mandatory)] [string]$Mode,      # "restart" | "remediation"
+        [Parameter(Mandatory)] [string]$Mode,      # "restart" | "remediation" | "noaction"
         [Parameter(Mandatory)] [string]$DomainName,
         [Parameter(Mandatory)] [string]$DeviceName,
         [Parameter(Mandatory)] [string]$UuidFolder,
@@ -175,7 +179,11 @@ function Invoke-LambdaUpload {
     # Folder preference:
     #   Service Restarts --> UUID --> Device
     #   Remediations     --> UUID --> Device
-    $prefixRoot = if ($Mode -eq 'restart') { 'ServiceRestarts' } else { 'Remediations' }
+    $prefixRoot = switch ($Mode) {
+        'restart'     { 'ServiceRestarts' }
+        'remediation' { 'Remediations' }
+        default       { 'NoAction' }
+    }
     $prefix     = "$prefixRoot/$UuidFolder/$DeviceName"
 
     $fileName   = Split-Path $LogPath -Leaf
@@ -201,6 +209,35 @@ function Invoke-LambdaUpload {
     }
 }
 
+# Datto component environment variable overrides (if provided)
+if (-not [string]::IsNullOrWhiteSpace($env:LAMBDA_URL)) { $LambdaUrl = $env:LAMBDA_URL.Trim() }
+if (-not [string]::IsNullOrWhiteSpace($env:DATTO_PLATFORM)) { $Platform = $env:DATTO_PLATFORM.Trim().ToLower() }
+if ($env:EVENT_LOOKBACK_HOURS -match '^\d+$') {
+    $candidate = [int]$env:EVENT_LOOKBACK_HOURS
+    if ($candidate -ge 1 -and $candidate -le 168) { $EventLookbackHours = $candidate }
+}
+if ($env:STABILIZATION_SECONDS -match '^\d+$') { $StabilizationSeconds = [int]$env:STABILIZATION_SECONDS }
+if ($env:START_TIMEOUT_SECONDS -match '^\d+$') { $StartTimeoutSeconds = [int]$env:START_TIMEOUT_SECONDS }
+if ($env:POST_REMEDIATE_WAIT_SECONDS -match '^\d+$') { $PostRemediateWaitSec = [int]$env:POST_REMEDIATE_WAIT_SECONDS }
+if (-not [string]::IsNullOrWhiteSpace($env:LOG_ROOT)) { $LocalLogRoot = $env:LOG_ROOT.Trim() }
+if ($env:UPLOAD_ON_NO_ACTION -match '^(?i:true|false)$') { $UploadOnNoAction = [bool]::Parse($env:UPLOAD_ON_NO_ACTION) }
+if ($env:REMEDIATE_ENABLED -match '^(?i:true|false)$') { $RemediateEnabled = [bool]::Parse($env:REMEDIATE_ENABLED) }
+if ($env:TLS12_ENFORCE -match '^(?i:true|false)$') { $Tls12Enforce = [bool]::Parse($env:TLS12_ENFORCE) }
+if ($env:STARTUP_GRACE_MINUTES -match '^\d+$') { $StartupGraceMinutes = [int]$env:STARTUP_GRACE_MINUTES }
+
+# Service control paths require elevated context.
+try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "ERROR: Script must run elevated (Administrator/SYSTEM). Exiting."
+        exit 1
+    }
+} catch {
+    Write-Host "ERROR: Unable to validate execution context. Exiting."
+    exit 1
+}
+
 # =========================
 # Start logging
 # =========================
@@ -211,6 +248,7 @@ $DeviceName   = $env:COMPUTERNAME
 $Timestamp    = Get-Timestamp
 $LogFileName  = "{0}_{1}_{2}.log" -f $DomainName, $DeviceName, $Timestamp
 $LogPath      = Join-Path $LocalLogRoot $LogFileName
+$ActionTaken  = "none"
 
 $transcribing = $false
 try {
@@ -231,6 +269,9 @@ Write-LogLine "===== Datto RMM Universal Fix starting at $(Get-Date) on $DeviceN
 Write-LogLine "Domain/Tenant: $DomainName"
 Write-LogLine "Platform: $Platform"
 Write-LogLine "Event lookback: $EventLookbackHours hour(s)"
+Write-LogLine "Remediation enabled: $RemediateEnabled"
+Write-LogLine "Upload on no action: $UploadOnNoAction"
+Write-LogLine "Startup grace window: $StartupGraceMinutes minute(s)"
 Write-LogLine "Waiting $([int]($StabilizationSeconds/60)) minutes before checking $ServiceName to allow system services to stabilize..."
 Start-Sleep -Seconds $StabilizationSeconds
 
@@ -274,6 +315,7 @@ do {
 
 if ($startSucceeded) {
     Write-LogLine "SUCCESS: $ServiceName started and is Running. No full remediation required."
+    $ActionTaken = "restart"
 
     # Upload ONLY because restart resolved a stopped service
     $siteUid = Get-SiteUid
@@ -302,7 +344,26 @@ Write-LogLine ("  - {0} | ID {1} | {2}" -f $failEvents[0].TimeCreated, $failEven
 # BOTH conditions met:
 # (A) service not running
 # (B) failure event exists
+if (-not $RemediateEnabled) {
+    Write-LogLine "Remediation is disabled by configuration (REMEDIATE_ENABLED=FALSE). Exiting without reinstall."
+    goto Done
+}
+
+if ($StartupGraceMinutes -gt 0) {
+    try {
+        $bootAt = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $uptime = (Get-Date) - $bootAt
+        if ($uptime.TotalMinutes -lt $StartupGraceMinutes) {
+            Write-LogLine ("Inside startup grace window ({0:N1} < {1} minutes). Skipping full remediation to avoid transient startup churn." -f $uptime.TotalMinutes, $StartupGraceMinutes)
+            goto Done
+        }
+    } catch {
+        Write-LogLine "WARNING: Could not calculate uptime for startup grace evaluation: $($_.Exception.Message)"
+    }
+}
+
 Write-LogLine "Both conditions met (service not Running + failure event detected). Proceeding with FULL REMEDIATION (agent reinstall)."
+$ActionTaken = "remediation"
 
 # =========================
 # Full remediation
@@ -317,7 +378,9 @@ if (-not $siteUid) {
 }
 
 # Preflight download before changing service/files
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+if ($Tls12Enforce) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 $downloadUrl = "https://$Platform.rmm.datto.com/download-agent/windows/$siteUid"
 $tempExe     = Join-Path $env:TEMP ("AgentInstall_{0}.exe" -f $siteUid)
@@ -387,6 +450,12 @@ Invoke-LambdaUpload -Mode "remediation" -DomainName $DomainName -DeviceName $Dev
 # Done
 # =========================
 :Done
+if ($ActionTaken -eq "none" -and $UploadOnNoAction) {
+    $siteUid = Get-SiteUid
+    if (-not $siteUid) { $siteUid = "UnknownUUID" }
+    Invoke-LambdaUpload -Mode "noaction" -DomainName $DomainName -DeviceName $DeviceName -UuidFolder $siteUid -LogPath $LogPath
+}
+
 Write-LogLine "===== Datto RMM Universal Fix finished at $(Get-Date) on $DeviceName ====="
 
 if ($transcribing) {
