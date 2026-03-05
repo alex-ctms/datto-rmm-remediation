@@ -1,0 +1,7 @@
+Why this change:
+- The README needed an explicit operator contract for Datto RMM variables and updated behavior documentation.
+
+What this commit improves:
+- Documents Name/Type/Default/Description for component variables.
+- Updates version notes for v2.2.0 safety and component controls.
+- Corrects formatting and operational examples (including Lambda URL typo in script help text).
